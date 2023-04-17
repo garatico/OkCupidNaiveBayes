@@ -4,7 +4,7 @@ This is a machine learning project that predicts the gender of an OkCupid dating
 using the Naive Bayes algorithm. The project includes a dataset of OkCupid dating profiles and their corresponding genders, which is used to train and test the algorithm.
 
 A report in HTML format that provides a detailed analysis of the project results can be found at :
-https://garatico.github.io/OkCupidNaiveBayes/master/blob/Project1.html.
+https://garatico.github.io/OkCupidNaiveBayes/blob/master/Project1.html.
 
 
 
