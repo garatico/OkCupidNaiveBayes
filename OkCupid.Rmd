@@ -1,0 +1,328 @@
+---
+title: "OkCupid"
+author: "Giovanni Aratico"
+date: "2023-07-02"
+output:
+  html_document:
+    self_contained: true
+output_file: index.html
+---
+
+```{r Setup, include=FALSE}
+library(tidyverse)  
+library(tidytext)
+library(lubridate)         # Date wrangling
+library(tm)                # Text Mining / Corpus, DTM, etc. 
+library(uuid)
+library(caTools)           # Used to split train / test data
+library(naivebayes)        # Used for Naive Bayes procedure
+
+# Source R functions files
+source('./src/data_cleaning.R')
+source('./src/feature_engineering.R')
+source('./src/plots.R')
+source('./src/model.R')
+```
+
+## Predict Male / Female profiles on OkCupid
+
+**What do we want to predict and why?**
+
+Our goal is to predict the gender of individuals based on the language used in their profile prompts. By analyzing these profiles and making accurate predictions, we can improve matchmaking algorithms and tailor marketing strategies to better reach each gender.
+
+```{r Import Data}
+set.seed(196)
+df = read.csv("data/okcupid_profiles.csv")
+```
+
+## Data Cleaning and Feature Engineering
+
+-   To prepare our data for categorical analysis, we convert several columns into factors.
+-   Additionally, we extract the year from the "last online" column to assess the duration of user inactivity.
+-   All profiles were last online in either 2011 or 2012. This finding suggests that the data was either collected during that period or that all profiles have since become inactive.
+-   We observe that 91 out of 59,946 profile locations did not contain the keyword "California." This suggests that the data set only includes users from California, and that these 91 observations likely belong to out-of-state visitors or data errors.
+
+```{r Data Cleaning & Feature Engineering}
+set.seed(196)
+df = group_locations_by_region(df)
+df_clean = data_cleaning(df)
+df_clean = feature_engineering(df_clean)
+df_clean = df_clean[sample(nrow(df_clean)),]
+
+# Create a stratified sample of 10% from the "sex_binary" column from df_clean
+strat_sample = sample.split(df_clean$sex_binary, SplitRatio = 0.10)
+strat_df = df_clean[strat_sample, ]
+```
+
+## EDA Plots
+
+-   A histogram of orientation showing the frequency distribution of sexual orientation among the users. The vast majority of users identified as straight at 86.1%, while a small percentage identified as gay or bisexual at 9.3% and 4.6% respectively. There were only a few missing values in this column.
+-   A histogram of sex shows the frequency distribution of biological sex. In this data set, there are slightly more male profiles (60%) than female profiles (40%). There were no profiles with missing sex data.
+-   A histogram of ages showing the frequency distribution across all age ranges in the data set. The majority of users are between the ages of 18 and 29, with fewer users in older age ranges.
+-   A histogram of ages showing the frequency distribution for users between the ages of 18 and 29.
+-   A histogram of region location showing the frequency distribution of user locations across different regions in California. In this dataset, about 52% of users are located in San Francisco, 21% are in the East Bay Region, and 26% are in other regions in California.
+
+```{r EDA Plots}
+# Plot histogram of orientation
+plot_frequency(df, orientation)
+# Plot histogram of sex
+plot_frequency(df, sex)
+# Plot histogram of all ages
+plot_age_histogram(df)
+# Plot histogram of ages 18-29
+plot_age_histogram(df, age_range = c(18, 29))
+# Plot histogram of region location
+plot_frequency(df, region)
+```
+
+## Text Preprocessing / Sparse Terms removal
+
+-   We create a corpus from the set of tokens, perform stemming, and then convert the corpus to a document-term matrix for the stratified data set.
+-   This is done to prepare the text data for use in the classification model.
+-   We apply frequency-based filtering to remove terms with document frequency less than a certain threshold.
+-   Specifically, we test different percentages and remove terms with document frequency less than each percentage.
+-   Then, we convert the sparse matrix to a dense matrix for each percentage hyper-parameter, which will be used as input for the Naive Bayes classifier.
+
+```{r Remove Unused Data 1, include=FALSE}
+rm(df)
+rm(df_clean)
+```
+
+```{r Text Preprocessing}
+# Combine essay prompts 0-9 into one for each profile
+df_clean_combined_essays = combine_essays(strat_df)
+
+# Create corpus from the set of tokens and perform stemming
+df_clean_corpus = Corpus(VectorSource(df_clean_combined_essays$essays))
+df_clean_corpus = tm_map(df_clean_corpus, stemDocument)
+
+# Convert corpus to document-term matrix
+df_clean_dtm = DocumentTermMatrix(df_clean_corpus)
+df_clean_matrix = as.matrix(df_clean_dtm)
+
+# Define the thresholds for reducing the document-term matrix
+thresholds = c(0.80, 0.90, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999)
+df_clean_matrices = list()
+
+# Reduce the document-term matrix based on each threshold
+for (threshold in thresholds) {
+  # Remove terms with document frequency less than the threshold
+  df_dtm_reduced = removeSparseTerms(df_clean_dtm, threshold)
+  # Convert the sparse matrix to a dense matrix
+  df_matrix_reduced = as.matrix(df_dtm_reduced)
+  # Store the reduced matrix in the list
+  df_clean_matrices[[as.character(threshold)]] = df_matrix_reduced
+}
+
+df_clean_matrices = append(df_clean_matrices, list(df_clean_matrix))
+```
+
+```{r Remove Unused Data 2, include=FALSE}
+rm(df_clean_corpus)
+rm(df_clean_dtm)
+rm(df_clean_matrix)
+rm(df_dtm_reduced)
+rm(df_clean_combined_essays)
+rm(data_frame)
+rm(matrix)
+```
+
+# Text Preprocessing Pt. 2
+
+```{r Converts from DTM to DTM with Dependent Variable}
+# Create a new data frame with sex_binary and the DTM
+data_frames = list()
+
+for (i in seq_along(df_clean_matrices)) {
+  matrix = df_clean_matrices[[i]]
+  sex_binary = strat_df$sex_binary
+  data_frame = data.frame(sex_binary = sex_binary, matrix)
+  data_frames[[i]] = data_frame
+}
+```
+
+```{r View Dimensions}
+for (i in 1:9) {
+  df_dim <- dim(data_frames[[i]])
+  print(paste("DF", i, ":", df_dim[1], "x", df_dim[2]))
+}
+```
+
+## Train / Test Split
+
+- We randomly sample 10% of the cleaned data to create a smaller data set for training and testing our models. 
+- An 80-20 split is used to partition the data into training and testing sets.
+
+```{r Train/Test Split}
+set.seed(196)  # Set seed for reproducibility
+
+train_dfs <- list()
+test_dfs <- list()
+
+for (i in seq_along(data_frames)) {
+  data_frame <- data_frames[[i]]
+  
+  # Perform the train-test split for the current data frame
+  split <- sample.split(data_frame$sex_binary, SplitRatio = 0.80)
+  train_df <- data_frame[split, ]
+  test_df <- data_frame[!split, ]
+  
+  # Store the train and test data frames in separate lists
+  train_dfs[[i]] <- train_df
+  test_dfs[[i]] <- test_df
+}
+```
+
+```{r Removed Unused Data 3, include=FALSE}
+rm(train_df)
+rm(test_df)
+rm(data_frames)
+```
+
+## Training / Hyperparameter Tuning / Performance Evaluation
+
+-   We will train a Naive Bayes classifier on a training matrix to predict gender from a transformed binary column.
+-   To optimize the model, we will tune the Laplace smoothing hyperparameter for each of the sparse term parameters.
+-   We will evaluate the performance of each parameter by making predictions on the test matrix and creating confusion matrices for further analysis.
+
+**Note:** The following cell may take some time to run, and it may output several warnings or error messages. However, it is necessary for the analysis as it trains the candidate models for later evaluation.
+
+```{r Train Candidate Models / Hyperparameter Tuning / Performance Evaluation, silent=TRUE}
+set.seed(196)
+laplace_values = c(0.001, 0.01, 0.1, 0.5, 1, 5, 10)
+
+nb_models_list = list()
+predictions_lists = list()
+confusion_matrices_list = list()
+
+for (i in 1:length(train_dfs)) {
+  train_df = train_dfs[[i]]
+  test_df = test_dfs[[i]]
+  train_matrix_reduced = as.matrix(train_df[, -which(names(train_df) == "sex_binary")])
+  test_matrix_reduced = as.matrix(test_df[, -which(names(test_df) == "sex_binary")])
+
+  nb_models = train_nb_classifiers(train_matrix_reduced, train_df$sex_binary, laplace_values)
+  nb_models_list[[i]] = nb_models
+
+  predictions_list = list()
+  confusion_matrices_sublist = list()
+
+  for (j in 1:length(nb_models)) {
+    predictions = predict(nb_models[[j]], test_matrix_reduced)
+    predictions_list[[j]] = predictions
+
+    confusion_matrix <- table(actual = test_df$sex_binary, predicted = predictions)
+    confusion_matrices_sublist[[j]] = confusion_matrix
+  }
+
+  predictions_lists[[i]] = predictions_list
+  confusion_matrices_list[[i]] = confusion_matrices_sublist
+}
+
+nb_models = nb_models_list
+confusion_matrices = confusion_matrices_list
+```
+
+```{r Remove Unused Data 4, include=FALSE}
+rm(confusion_matrices_list)
+rm(nb_models)
+rm(predictions_list)
+rm(train_df)
+rm(test_df)
+```
+
+## Calculating Metrics
+
+We calculate the average performance of the Naive Bayes classifier using five different metrics that are evaluated from the information present in each confusion matrix.
+
+```{r Calculate Metrics}
+# Define a function to calculate accuracy, sensitivity, and specificity
+calc_metrics <- function(cm) {
+  total <- sum(cm)
+  accuracy <- sum(diag(cm)) / total
+  sensitivity <- cm[2, 2] / sum(cm[2, ])
+  specificity <- cm[1, 1] / sum(cm[1, ])
+  precision <- cm[2, 2] / sum(cm[, 2])
+  f1_score <- 2 * precision * sensitivity / (precision + sensitivity)
+  return(list(accuracy = accuracy, sensitivity = sensitivity, specificity = specificity, precision = precision, f1_score = f1_score))
+}
+
+metrics_list <- list()
+avg_metrics <- list()
+
+for (i in 1:length(confusion_matrices)) {
+  cm_sublist <- confusion_matrices[[i]]
+  metrics_sublist <- list()
+  
+  for (j in 1:length(cm_sublist)) {
+    cm <- cm_sublist[[j]]
+    metrics <- calc_metrics(cm)
+    metrics_sublist[[j]] <- as.numeric(unlist(metrics))  # Convert metrics to numeric
+  }
+  
+  metrics_list[[i]] <- metrics_sublist
+  
+  # Calculate average metrics
+  avg_metrics[[i]] <- colMeans(do.call(rbind, metrics_sublist))
+}
+rm(metrics_sublist)
+```
+
+## Metrics Plot Preprocessing
+
+After the metrics are calculated for each combination of hyperparameters, a full data frame is constructed with the average metric values for each combination. This data frame makes it easy to compare the performance of different models and to create visualizations for further analysis.
+
+```{r View Metrics}
+avg_metrics
+```
+
+```{r Metrics Plot Preprocessing}
+thresholds = c(0.80, 0.90, 0.925, 0.95, 0.975, 0.99, 0.995, 0.999, 1.00)
+metrics_df = data.frame(
+  Accuracy = sapply(avg_metrics, function(x) x[[1]][1]),
+  Sensitivity = sapply(avg_metrics, function(x) x[[2]][1]),
+  Specificity = sapply(avg_metrics, function(x) x[[3]][1]),
+  Precision = sapply(avg_metrics, function(x) x[[4]][1]),
+  F1_Score = sapply(avg_metrics, function(x) x[[5]][1]),
+  Laplace = rep(laplace_values, each = length(thresholds)),
+  Features = rep(paste0(as.character(thresholds * 100), "%"), times = length(laplace_values))
+)
+
+```
+
+## Metrics Plots
+
+```{r Metrics Plots}
+# Convert Features column to factor with desired order
+metrics_df$Features <- factor(metrics_df$Features, levels = paste0(as.character(thresholds * 100), "%"))
+
+# Plot all metrics against feature percentage
+ggplot(metrics_df, aes(x = Features)) +
+  geom_line(aes(y = Accuracy, color = "Accuracy", group = Laplace), linewidth = 1) +
+  geom_point(aes(y = Accuracy, color = "Accuracy", group = Laplace), size = 3) +
+  geom_line(aes(y = Sensitivity, color = "Sensitivity", group = Laplace), linewidth = 1) +
+  geom_point(aes(y = Sensitivity, color = "Sensitivity", group = Laplace), size = 3) +
+  geom_line(aes(y = Specificity, color = "Specificity", group = Laplace), linewidth = 1) +
+  geom_point(aes(y = Specificity, color = "Specificity", group = Laplace), size = 3) +
+  geom_line(aes(y = Precision, color = "Precision", group = Laplace), linewidth = 1) +
+  geom_point(aes(y = Precision, color = "Precision", group = Laplace), size = 3) +
+  geom_line(aes(y = F1_Score, color = "F1 Score", group = Laplace), linewidth = 1) +
+  geom_point(aes(y = F1_Score, color = "F1 Score", group = Laplace), size = 3) +
+  labs(title = "Performance Metrics vs. Feature Percentage (10% Sample)",
+       x = "Feature Percentage",
+       y = "Metric Value",
+       color = "Metric") +
+  scale_color_manual(values = c("Accuracy" = "red", "Sensitivity" = "blue", 
+                                "Specificity" = "green", "Precision" = "purple", 
+                                "F1 Score" = "orange"),
+                     labels = c("Accuracy", "Sensitivity", "Specificity", "Precision", "F1 Score")) +
+  theme_dark() +
+  theme(plot.background = element_rect(fill = "lightgray"))
+
+```
+
+## SUMMARY
+
+In this project, we investigated the effectiveness of Naive Bayes classifier in predicting the sex of individuals based on their OkCupid dating profiles using a dataset of anonymized profiles from OkCupid in the United States. Due to limited processing power and the large size of the data (\~130MB), we opted for an 80/20 train-test split for model evaluation instead of cross-validation, which is more computationally expensive. Although a simple train-test split may result in higher variance in the estimated performance metrics compared to cross-validation, we believe it is a reasonable trade-off between computational efficiency and model performance given our resources.
+
+SOURCE: <https://www.kaggle.com/datasets/yashsrivastava51213/okcupid-profiles-dataset>

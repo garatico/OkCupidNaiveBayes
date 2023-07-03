@@ -1,25 +1,16 @@
-# Train a single Naive Bayes model using incremental updating
-train_nb_classifier = function(dtm_train, dv, laplace_param) {
-  # Calculate the number of rows in the training data and the frequency of progress updates
-  n_rows = nrow(dtm_train)
-  print_every = round(n_rows/10)
-  # Convert the sparse matrix to a dense matrix as required by the naiveBayes function
-  dtm_matrix_df = as.data.frame(as.matrix(dtm_train))
-  
-  # Train the initial model using the first row of the data
-  nb_model = naiveBayes(x = dtm_matrix_df, y = dv, laplace = laplace_param)
-  return(nb_model)
-}
 
 # Train multiple Naive Bayes models using different passed laplace parameters
 train_nb_classifiers = function(dtm_train, dv, laplace_params) {
+  if (!is.factor(dv)) {
+    dv <- factor(dv)
+  }
   # Initialize an empty list to store the models
   nb_models_list = list()
   
   # Loop through all laplace parameters and train a model for each
   for (laplace_param in laplace_params) {
     # Train the model
-    nb_model = train_nb_classifier(dtm_train, dv, laplace_param)
+    nb_model = naive_bayes(x = dtm_train, y = dv, laplace = laplace_param)
     
     # Add the model to the list
     nb_models_list[[as.character(laplace_param)]] = nb_model

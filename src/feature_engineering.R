@@ -44,10 +44,13 @@ group_locations_by_region = function(df) {
 combine_essays = function(df) {
   essay_cols = grep("^essay\\d+_tokens$", colnames(df), value = TRUE)
   combined_essays = vector("character", nrow(df))
+  combined_sex = vector("character", nrow(df))  # New line
   for (i in seq_len(nrow(df))) {
     essay_tokens = unlist(df[i, essay_cols])
     combined_essays[i] = paste(essay_tokens, collapse = " ")
+    combined_sex[i] = df[i, "sex_binary"]  # New line
   }
-  return(combined_essays)
+  combined_data = data.frame(essays = combined_essays, sex = combined_sex)  # New line
+  return(combined_data)  # Modified line
 }
 
